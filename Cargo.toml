@@ -1,0 +1,11 @@
+[package]
+name = "microdata"
+version = "0.0.0"
+edition = "2024"
+authors = ["Nordine Bittich"]
+description = "parse microdata annotations"
+homepage = "https://github.com/nbittich/microdata"
+repository = "https://github.com/nbittich/microdata"
+readme = "README.md"
+license = "MIT"
+[dependencies]
