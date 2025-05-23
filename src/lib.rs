@@ -1,5 +1,5 @@
 #![allow(unused)] // todo remove this
-use std::{collections::VecDeque, error::Error};
+use std::{collections::VecDeque, error::Error, sync::Arc};
 
 use domain::{Config, ItemScope, Property, ValueType};
 use log::debug;
@@ -97,10 +97,17 @@ fn traverse<'a>(
 ) -> Result<(), Box<dyn Error>> {
     let mut id = element_ref.attr("id");
     let mut itemscope = element_ref.attr("itemscope");
-    let itemrefs = element_ref
-        .attr("itemref")
-        .map(|r| r.split(" ").map(|r| format!("#{r}")).collect::<Vec<_>>());
-    let mut itemprop = element_ref.attr("itemprop");
+    let itemrefs = element_ref.attr("itemref").map(|r| {
+        r.split(" ")
+            .filter(|r| !r.trim().is_empty())
+            .map(|r| format!("#{r}"))
+            .collect::<Vec<_>>()
+    });
+    let mut itemprops = element_ref.attr("itemprop").map(|r| {
+        r.split(" ")
+            .filter(|r| !r.trim().is_empty())
+            .collect::<Vec<_>>()
+    });
     if let Some(itemscope) = itemscope.take() {
         let mut itemscope = ItemScope {
             ..Default::default()
@@ -129,22 +136,27 @@ fn traverse<'a>(
                 items,
             )?;
         }
-        if let Some(itemprop) = itemprop.take() {
-            if let Some(parent) = parent.as_deref_mut() {
-                parent.push_back(Property {
-                    name: domain::Name::String(itemprop.to_string()),
-                    value: domain::ValueType::Scope(itemscope),
-                });
+        if let Some(itemprops) = itemprops.take() {
+            let itemscope = Arc::new(itemscope);
+            for itemprop in itemprops {
+                if let Some(parent) = parent.as_deref_mut() {
+                    parent.push_back(Property {
+                        name: domain::Name::String(itemprop.to_string()),
+                        value: domain::ValueType::ScopeRef(itemscope.clone()),
+                    });
+                }
             }
         } else {
             items.push_back(itemscope);
         }
-    } else if let Some(itemprop) = itemprop.take() {
-        if let Some(parent) = parent.as_deref_mut() {
-            parent.push_back(Property {
-                name: domain::Name::String(itemprop.to_string()),
-                value: property_value(config, element_ref),
-            });
+    } else if let Some(itemprops) = itemprops.take() {
+        for itemprop in itemprops {
+            if let Some(parent) = parent.as_deref_mut() {
+                parent.push_back(Property {
+                    name: domain::Name::String(itemprop.to_string()),
+                    value: property_value(config, element_ref),
+                });
+            }
         }
     } else {
         for child in element_ref.child_elements() {
@@ -157,7 +169,7 @@ fn traverse<'a>(
 
 #[cfg(test)]
 mod test {
-    use std::collections::VecDeque;
+    use std::{collections::VecDeque, sync::Arc};
 
     use crate::{
         domain::{ItemScope, Name, Property, ValueType},
@@ -308,7 +320,7 @@ mod test {
                     },
                     Property {
                         name: Name::String("aggregateRating".to_string()),
-                        value: ValueType::Scope(ItemScope {
+                        value: ValueType::ScopeRef(Arc::new(ItemScope {
                             id: None,
                             items: vec![
                                 Property {
@@ -321,7 +333,7 @@ mod test {
                                 },
                             ]
                             .into()
-                        })
+                        }))
                     },
                 ])
             }])
@@ -346,7 +358,6 @@ mod test {
             }])
         );
     }
-
     #[test]
     fn test_example7() {
         let html = r#"
@@ -367,7 +378,7 @@ mod test {
                     },
                     Property {
                         name: Name::String("band".to_string()),
-                        value: ValueType::Scope(ItemScope {
+                        value: ValueType::ScopeRef(Arc::new(ItemScope {
                             id: None,
                             items: vec![
                                 Property {
@@ -380,7 +391,7 @@ mod test {
                                 },
                             ]
                             .into()
-                        })
+                        }))
                     },
                 ])
             }])
@@ -410,7 +421,7 @@ mod test {
                     },
                     Property {
                         name: Name::String("band".to_string()),
-                        value: ValueType::Scope(ItemScope {
+                        value: ValueType::ScopeRef(Arc::new(ItemScope {
                             id: None,
                             items: vec![
                                 Property {
@@ -423,10 +434,94 @@ mod test {
                                 },
                             ]
                             .into()
-                        })
+                        }))
                     },
                 ])
             }])
         );
+    }
+    #[test]
+    fn test_example9() {
+        let html = r#"
+            <div itemscope>
+            <p>Flavors in my favorite ice cream:</p>
+            <ul>
+            <li itemprop="flavor">Lemon sorbet</li>
+            <li itemprop="flavor">Apricot sorbet</li>
+            </ul>
+            </div>
+        "#;
+        let res = parse_html("http://bittich.be/", html).unwrap();
+        assert_eq!(
+            res,
+            VecDeque::from([ItemScope {
+                id: None,
+                items: VecDeque::from([
+                    Property {
+                        name: Name::String("flavor".to_string()),
+                        value: ValueType::String("Lemon sorbet".into())
+                    },
+                    Property {
+                        name: Name::String("flavor".to_string()),
+                        value: ValueType::String("Apricot sorbet".into())
+                    },
+                ])
+            }])
+        );
+    }
+
+    #[test]
+    fn test_example10() {
+        let html = r#"
+            <div itemscope>
+            <span itemprop="favorite-color favorite-fruit">orange</span>
+            </div>
+        "#;
+        let res = parse_html("http://bittich.be/", html).unwrap();
+        assert_eq!(
+            res,
+            VecDeque::from([ItemScope {
+                id: None,
+                items: VecDeque::from([
+                    Property {
+                        name: Name::String("favorite-color".to_string()),
+                        value: ValueType::String("orange".into())
+                    },
+                    Property {
+                        name: Name::String("favorite-fruit".to_string()),
+                        value: ValueType::String("orange".into())
+                    },
+                ])
+            }])
+        );
+    }
+
+    #[test]
+    fn test_example11() {
+        let html = r#"
+            <figure>
+            <img src="castle.jpeg">
+            <figcaption><span itemscope><span itemprop="name">The Castle</span></span> (1986)</figcaption>
+            </figure>        "#;
+        let res = parse_html("http://bittich.be/", html).unwrap();
+        assert_eq!(
+            res,
+            VecDeque::from([ItemScope {
+                id: None,
+                items: VecDeque::from([Property {
+                    name: Name::String("name".to_string()),
+                    value: ValueType::String("The Castle".into())
+                },])
+            }])
+        );
+        let html = r#"
+            <span itemscope><meta itemprop="name" content="The Castle"></span>
+            <figure>
+            <img src="castle.jpeg">
+            <figcaption>The Castle (1986)</figcaption>
+            </figure>      
+            "#;
+        let res2 = parse_html("http://bittich.be/", html).unwrap();
+        assert_eq!(res, res2);
     }
 }

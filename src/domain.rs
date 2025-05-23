@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct ItemScope {
@@ -13,7 +13,7 @@ pub enum ValueType {
     String(String),
     Meter(String),
     Time(String),
-    Scope(ItemScope),
+    ScopeRef(Arc<ItemScope>),
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
