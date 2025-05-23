@@ -9,3 +9,15 @@ repository = "https://github.com/nbittich/microdata"
 readme = "README.md"
 license = "MIT"
 [dependencies]
+env_logger = "0.11.8"
+ego-tree = "0.10.0"
+scraper = "0.23.1"
+log = "0.4.27"
+url = "2.5.4"
+
+[profile.release]
+opt-level = 'z'   # Optimize for size.
+lto = true        # Link Time Optimization (LTO)
+codegen-units = 1 # Set this to 1 to allow for maximum size reduction optimizations:
+panic = 'abort'   # removes the need for this extra unwinding code.
+strip = "symbols"
