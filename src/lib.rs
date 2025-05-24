@@ -1,5 +1,9 @@
 #![allow(unused)] // todo remove this
-use std::{collections::VecDeque, error::Error, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet, VecDeque},
+    error::Error,
+    sync::Arc,
+};
 
 use domain::{Config, ItemScope, Property, ValueType};
 use log::debug;
@@ -26,6 +30,7 @@ pub fn parse_html<'a>(
         &document.root_element(),
         &mut None,
         &mut items,
+        &mut BTreeSet::new(),
     )?;
     Ok(items)
 }
@@ -94,13 +99,13 @@ fn traverse<'a>(
     element_ref: &ElementRef<'a>,
     parent: &mut Option<&mut VecDeque<Property>>,
     items: &mut VecDeque<ItemScope>,
+    in_ref: &mut BTreeSet<Option<&'a str>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut id = element_ref.attr("id");
     let mut itemscope = element_ref.attr("itemscope");
     let itemrefs = element_ref.attr("itemref").map(|r| {
         r.split(" ")
             .filter(|r| !r.trim().is_empty())
-            .map(|r| format!("#{r}"))
             .collect::<Vec<_>>()
     });
     let mut itemprops = element_ref.attr("itemprop").map(|r| {
@@ -113,17 +118,26 @@ fn traverse<'a>(
             ..Default::default()
         };
         if let Some(itemrefs) = itemrefs {
+            if itemrefs.iter().any(|s| in_ref.contains(&Some(s))) {
+                return Err(format!("cycle detected! {in_ref:?}").into());
+            }
             for itemref in itemrefs {
-                let selector = Selector::parse(itemref.as_str()).map_err(|e| e.to_string())?;
+                let selector =
+                    Selector::parse(&format!("#{itemref}")).map_err(|e| e.to_string())?;
                 let elts = document.select(&selector);
                 for elt in elts {
+                    if elt.attr("id").is_some() {
+                        in_ref.insert(elt.attr("id"));
+                    }
                     traverse(
                         config,
                         document,
                         &elt,
                         &mut Some(&mut itemscope.items),
                         items,
+                        in_ref,
                     )?;
+                    in_ref.remove(&elt.attr("id"));
                 }
             }
         }
@@ -134,6 +148,7 @@ fn traverse<'a>(
                 &child,
                 &mut Some(&mut itemscope.items),
                 items,
+                in_ref,
             )?;
         }
         if let Some(itemprops) = itemprops.take() {
@@ -161,7 +176,7 @@ fn traverse<'a>(
     } else {
         for child in element_ref.child_elements() {
             // check what's next
-            traverse(config, document, &child, parent, items)?;
+            traverse(config, document, &child, parent, items, in_ref)?;
         }
     }
     Ok(())
@@ -169,7 +184,10 @@ fn traverse<'a>(
 
 #[cfg(test)]
 mod test {
-    use std::{collections::VecDeque, sync::Arc};
+    use std::{
+        collections::{BTreeSet, HashSet, VecDeque},
+        sync::Arc,
+    };
 
     use crate::{
         domain::{ItemScope, Name, Property, ValueType},
@@ -440,6 +458,7 @@ mod test {
             }])
         );
     }
+
     #[test]
     fn test_example9() {
         let html = r#"
@@ -523,5 +542,135 @@ mod test {
             "#;
         let res2 = parse_html("http://bittich.be/", html).unwrap();
         assert_eq!(res, res2);
+    }
+    #[test]
+    fn test_example12() {
+        let html = r#"
+        <div itemscope id="amanda" itemref="a b"></div>
+        <p id="a">Name: <span itemprop="name">Amanda</span></p>
+        <div id="b" itemprop="band" itemscope itemref="c"></div>
+        <div id="c">
+        <p>Band: <span itemprop="name">Jazz Band</span></p>
+        <p>Band: <span itemprop="name" itemscope itemref="amanda">Jazz Band</span></p>
+        <p>Size: <span itemprop="size">12</span> players</p>
+        </div>
+        "#;
+        let res = parse_html("http://bittich.be/", html);
+        assert_eq!(
+            res.err().map(|e| e.to_string()),
+            Some(format!(
+                "cycle detected! {:?}",
+                BTreeSet::from([Some("amanda"), Some("b"), Some("c")])
+            ))
+        );
+
+        assert_eq!(
+            parse_html(
+                "http://bittich.be",
+                r#"
+        <div itemscope itemtype="http://schema.org/Person" id="person1" itemref="person1">
+         <span itemprop="name">Alice</span>
+        </div>
+        "#
+            )
+            .err()
+            .map(|s| s.to_string()),
+            Some(format!(
+                "cycle detected! {:?}",
+                BTreeSet::from([Some("person1")])
+            ))
+        );
+
+        assert_eq!(
+            parse_html(
+                "http://bittich.be",
+                r#"
+        <div itemscope itemtype="http://schema.org/Person" id="person1" itemref="person2">
+        <span itemprop="name">Bob</span>
+        </div>
+        <div itemscope itemtype="http://schema.org/Person" id="person2" itemref="person1">
+        <span itemprop="name">Carol</span>
+        </div>
+        "#
+            )
+            .err()
+            .map(|s| s.to_string()),
+            Some(format!(
+                "cycle detected! {:?}",
+                BTreeSet::from([Some("person1"), Some("person2")])
+            ))
+        );
+        assert_eq!(
+            parse_html(
+                "http://bittich.be",
+                r#"
+                <div itemscope itemtype="http://schema.org/Person" id="a" itemref="b">
+                <span itemprop="name">Dave</span>
+                </div>
+
+                <div itemscope itemtype="http://schema.org/Person" id="b" itemref="c">
+                <span itemprop="name">Eve</span>
+                </div>
+
+                <div itemscope itemtype="http://schema.org/Person" id="c" itemref="a">
+                <span itemprop="name">Frank</span>
+                </div>        
+                "#
+            )
+            .err()
+            .map(|s| s.to_string()),
+            Some(format!(
+                "cycle detected! {:?}",
+                BTreeSet::from([Some("a"), Some("b"), Some("c")])
+            ))
+        );
+        assert_eq!(
+            parse_html(
+                "http://bittich.be",
+                r#"
+                <div itemscope itemtype="http://schema.org/Organization" id="org" itemref="team leader">
+                <span itemprop="name">TechCorp</span>
+                </div>
+
+                <div itemscope itemtype="http://schema.org/Person" id="leader" itemref="org team">
+                <span itemprop="name">Grace</span>
+                </div>
+
+                <div itemscope itemtype="http://schema.org/Person" id="team" itemref="leader">
+                <span itemprop="name">Heidi</span>
+                </div>     
+                "#
+            )
+            .err()
+            .map(|s| s.to_string()),
+            Some(format!(
+                "cycle detected! {:?}",
+                BTreeSet::from([Some("leader"),Some("team")])
+            ))
+        );
+        assert_eq!(
+            parse_html(
+                "http://bittich.be",
+                r#"
+                    <div itemscope itemtype="http://schema.org/Event" id="event" itemref="venue">
+                    <span itemprop="name">Conference 2025</span>
+                    </div>
+
+                    <div itemscope itemtype="http://schema.org/Place" id="venue" itemref="organizer">
+                    <span itemprop="name">City Hall</span>
+                    </div>
+
+                    <div itemscope itemtype="http://schema.org/Organization" id="organizer" itemref="event">
+                    <span itemprop="name">TechGroup</span>
+                    </div>  
+                "#
+            )
+            .err()
+            .map(|s| s.to_string()),
+            Some(format!(
+                "cycle detected! {:?}",
+                BTreeSet::from([Some("event"),Some("organizer"), Some("venue")])
+            ))
+        );
     }
 }
