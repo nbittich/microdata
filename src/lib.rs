@@ -1,14 +1,13 @@
-#![allow(unused)] // todo remove this
 use std::{
-    collections::{BTreeSet, HashSet, VecDeque},
+    collections::{BTreeSet, VecDeque},
     error::Error,
     sync::Arc,
 };
 
-use domain::{Config, ItemScope, Property, ValueType};
+use domain::{Config, ItemScope, Name, Property, ValueType};
 use log::debug;
-use scraper::{ElementRef, Html, Selector, selectable::Selectable, selector::Parser};
-use url::{ParseError, Url};
+use scraper::{ElementRef, Html, Selector};
+use url::Url;
 
 pub mod domain;
 
@@ -40,6 +39,7 @@ fn serialize_url<'a>(config: Config<'a>, url_elt: Option<&'a str>) -> ValueType 
     if let Some(url_elt) = url_elt {
         match url::Url::parse(url_elt.trim()) {
             Ok(url) => ValueType::Url(url.to_string()),
+            Err(_) if config.base_url.is_empty() => ValueType::String(url_elt.trim().to_string()), // assume relative
             Err(e) => {
                 debug!("could not parse url {e}");
                 let url_elt = if url_elt.starts_with("/") {
@@ -94,6 +94,18 @@ fn property_value<'a>(config: Config<'a>, element_ref: &ElementRef<'a>) -> Value
     }
 }
 
+fn serialize_name(config: Config, itemprop: String) -> Result<Name, Box<dyn Error>> {
+    match serialize_url(config, Some(itemprop.as_str())) {
+        ValueType::Url(url) => Ok(domain::Name::Url(url)),
+        _ if !itemprop
+            .chars()
+            .any(|b| ['\u{003A}', '\u{002E}'].contains(&b)) =>
+        {
+            Ok(domain::Name::String(itemprop.to_string()))
+        }
+        _ => Err(format!("itemprop {itemprop} is not a valid property").into()),
+    }
+}
 fn traverse<'a>(
     config: Config<'a>,
     document: &'a Html,
@@ -102,8 +114,7 @@ fn traverse<'a>(
     items: &mut VecDeque<ItemScope>,
     in_ref: &mut BTreeSet<Option<&'a str>>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut id = element_ref.attr("id");
-    let mut itemscope = element_ref.attr("itemscope");
+    let itemscope = element_ref.attr("itemscope");
     let itemid = element_ref.attr("itemid").map(|r| r.trim().to_string());
     let itemtype = element_ref
         .attr("itemtype")
@@ -127,7 +138,7 @@ fn traverse<'a>(
             .filter(|r| !r.is_empty())
             .collect::<Vec<_>>()
     });
-    if let Some(itemscope) = itemscope.take() {
+    if itemscope.is_some() {
         let mut itemscope = ItemScope {
             itemtype,
             itemid,
@@ -171,23 +182,22 @@ fn traverse<'a>(
             let itemscope = Arc::new(itemscope);
             for itemprop in itemprops {
                 if let Some(parent) = parent.as_deref_mut() {
-                    parent.push_back(Property {
-                        name: match serialize_url(config, Some(itemprop.as_str())) {
-                            ValueType::Url(url) => domain::Name::Url(url),
-                            _ if !itemprop
-                                .chars()
-                                .any(|b| ['\u{003A}', '\u{002E}'].contains(&b)) =>
-                            {
-                                domain::Name::String(itemprop.to_string())
-                            }
+                    let name = serialize_name(config, itemprop)?;
+                    let value = domain::ValueType::ScopeRef(itemscope.clone());
+                    // let prop = Property { name, value };
+                    if let Some(prop_with_same_name) = parent.iter_mut().find(|p| p.name == name) {
+                        match &mut prop_with_same_name.value {
+                            ValueType::Array(value_types) => value_types.push_back(value),
                             _ => {
-                                return Err(
-                                    format!("itemprop {itemprop} is not a valid property").into()
-                                );
+                                prop_with_same_name.value = ValueType::Array(VecDeque::from([
+                                    prop_with_same_name.value.clone(),
+                                    value,
+                                ]));
                             }
-                        },
-                        value: domain::ValueType::ScopeRef(itemscope.clone()),
-                    });
+                        }
+                    } else {
+                        parent.push_back(Property { name, value });
+                    }
                 }
             }
         } else {
@@ -196,23 +206,22 @@ fn traverse<'a>(
     } else if let Some(itemprops) = itemprops.take() {
         for itemprop in itemprops {
             if let Some(parent) = parent.as_deref_mut() {
-                parent.push_back(Property {
-                    name: match serialize_url(config, Some(itemprop.as_str())) {
-                        ValueType::Url(url) => domain::Name::Url(url),
-                        _ if !itemprop
-                            .chars()
-                            .any(|b| ['\u{003A}', '\u{002E}'].contains(&b)) =>
-                        {
-                            domain::Name::String(itemprop.to_string())
-                        }
+                let name = serialize_name(config, itemprop)?;
+                let value = property_value(config, element_ref);
+                // let prop = Property { name, value };
+                if let Some(prop_with_same_name) = parent.iter_mut().find(|p| p.name == name) {
+                    match &mut prop_with_same_name.value {
+                        ValueType::Array(value_types) => value_types.push_back(value),
                         _ => {
-                            return Err(
-                                format!("itemprop {itemprop} is not a valid property").into()
-                            );
+                            prop_with_same_name.value = ValueType::Array(VecDeque::from([
+                                prop_with_same_name.value.clone(),
+                                value,
+                            ]));
                         }
-                    },
-                    value: property_value(config, element_ref),
-                });
+                    }
+                } else {
+                    parent.push_back(Property { name, value });
+                }
             }
         }
     } else {
@@ -227,7 +236,7 @@ fn traverse<'a>(
 #[cfg(test)]
 mod test {
     use std::{
-        collections::{BTreeSet, HashSet, VecDeque},
+        collections::{BTreeSet, VecDeque},
         sync::Arc,
     };
 
@@ -530,16 +539,16 @@ mod test {
             VecDeque::from([ItemScope {
                 itemid: None,
                 itemtype: vec![],
-                items: VecDeque::from([
-                    Property {
-                        name: Name::Url("http://bittich.be/flavor".to_string()),
-                        value: ValueType::String("Lemon sorbet".into())
-                    },
-                    Property {
-                        name: Name::Url("http://bittich.be/flavor".to_string()),
-                        value: ValueType::String("Apricot sorbet".into())
-                    },
-                ])
+                items: VecDeque::from([Property {
+                    name: Name::Url("http://bittich.be/flavor".to_string()),
+                    value: ValueType::Array(
+                        [
+                            ValueType::String("Lemon sorbet".into()),
+                            ValueType::String("Apricot sorbet".into())
+                        ]
+                        .into()
+                    )
+                }])
             }])
         );
     }
@@ -782,5 +791,71 @@ mod test {
             res.err().map(|s| s.to_string()),
             Some("itemprop :b is not a valid property".to_string())
         );
+    }
+
+    #[test]
+    fn test_example15() {
+        let html = r#"
+                <section id="jack" itemscope itemtype="http://microformats.org/profile/hcard">
+                <h1 itemprop="fn">
+                <span itemprop="n" itemscope>
+                <span itemprop="given-name">Jack</span>
+                <span itemprop="family-name">Bauer</span>
+                </span>
+                </h1>
+                <img itemprop="photo" alt="" src="jack-bauer.jpg">
+                <p itemprop="org" itemscope>
+                <span itemprop="organization-name">Counter-Terrorist Unit</span>
+                (<span itemprop="organization-unit">Los Angeles Division</span>)
+                </p>
+                <p>
+                <span itemprop="adr" itemscope>
+                <span itemprop="street-address">10201 W. Pico Blvd.</span><br>
+                <span itemprop="locality">Los Angeles</span>,
+                <span itemprop="region">CA</span>
+                <span itemprop="postal-code">90064</span><br>
+                <span itemprop="country-name">United States</span><br>
+                </span>
+                <span itemprop="geo">34.052339;-118.410623</span>
+                </p>
+                <h2>Assorted Contact Methods</h2>
+                <ul>
+                <li itemprop="tel" itemscope>
+                <span itemprop="value">+1 (310) 597 3781</span> <span itemprop="type">work</span>
+                <meta itemprop="type" content="voice">
+                </li>
+                <li><a itemprop="url" href="https://en.wikipedia.org/wiki/Jack_Bauer">I'm on Wikipedia</a>
+                so you can leave a message on my user talk page.</li>
+                <li><a itemprop="url" href="http://www.jackbauerfacts.com/">Jack Bauer Facts</a></li>
+                <li itemprop="email"><a href="mailto:j.bauer@la.ctu.gov.invalid">j.bauer@la.ctu.gov.invalid</a></li>
+                <li itemprop="tel" itemscope>
+                <span itemprop="value">+1 (310) 555 3781</span> <span>
+                <meta itemprop="type" content="cell">mobile phone</span>
+                </li>
+                </ul>
+                <ins datetime="2008-07-20 21:00:00+01:00">
+                <meta itemprop="rev" content="2008-07-20 21:00:00+01:00">
+                <p itemprop="tel" itemscope><strong>Update!</strong>
+                My new <span itemprop="type">home</span> phone number is
+                <span itemprop="value">01632 960 123</span>.</p>
+                </ins>
+                </section>
+                <address itemscope itemtype="http://microformats.org/profile/hcard">
+                    <strong itemprop="fn"><span itemprop="n" itemscope><span itemprop="given-name">Alfred</span>
+                    <span itemprop="family-name">Person</span></span></strong> <br>
+                    <span itemprop="adr" itemscope>
+                    <span itemprop="street-address">1600 Amphitheatre Parkway</span> <br>
+                    <span itemprop="street-address">Building 43, Second Floor</span> <br>
+                    <span itemprop="locality">Mountain View</span>,
+                    <span itemprop="region">CA</span> <span itemprop="postal-code">94043</span>
+                    </span>
+                    </address>
+                    <span itemscope itemtype="http://microformats.org/profile/hcard"
+                    ><span itemprop=fn><span itemprop="n" itemscope><span itemprop="given-name"
+                    >George</span> <span itemprop="family-name">Washington</span></span
+                    ></span></span>
+        "#;
+        let res = parse_html("", html).unwrap();
+        println!("{}", serde_json::to_string_pretty(&res).unwrap());
     }
 }
