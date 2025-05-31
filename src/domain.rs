@@ -2,7 +2,8 @@ use std::{collections::VecDeque, sync::Arc};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct ItemScope {
-    pub id: Option<String>,
+    pub itemid: Option<String>,
+    pub itemtype: Vec<String>,
     pub items: VecDeque<Property>,
 }
 
